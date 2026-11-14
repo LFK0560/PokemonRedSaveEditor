@@ -1,0 +1,16 @@
+__pycache__/
+.venv/
+work/
+build/
+dist/
+*.gb
+*.gbc
+*.srm
+*.srm.*
+*.sav
+*.sav.*
+*.ram
+*.sgm
+*.state
+*.state[0-9]*
+备份/
