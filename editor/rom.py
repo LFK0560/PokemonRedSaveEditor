@@ -4,6 +4,7 @@ from math import isqrt
 from pathlib import Path
 
 from .charset import Charset
+from .international import CHINESE_TABLES, KEY_ITEMS, discover, read_evolution
 
 
 ROM_HASH = "f4092c50b04a0c471c8e1cda4af1551ac451c754be8ae03f86430c9c0dc0e073"
@@ -84,17 +85,22 @@ class Item:
 
 class Catalog:
     def __init__(self, rom: bytes):
-        if sha256(rom).hexdigest() != ROM_HASH:
-            raise ValueError("ROM 的 SHA-256 与支持的《口袋妖怪红》简体中文版不符。")
+        self.sha256 = sha256(rom).hexdigest()
+        self.verified = self.sha256 == ROM_HASH
+        if self.verified:
+            self.tables = CHINESE_TABLES
+            self.charset = Charset(rom)
+            self.version = "简体中文红版 · 已验证"
+        else:
+            self.tables, self.charset, self.version = discover(rom)
         self.rom = rom
-        self.charset = Charset(rom)
-        self.moves = {0: "— 空招式 —", **self.read_names(0xB0000, 165)}
-        self.base_pp = {0: 0, **{i: rom[0x38000 + (i - 1) * 6 + 5] for i in range(1, 166)}}
+        self.moves = {0: "— 空招式 —", **self.read_names(self.tables.move_names, 165)}
+        self.base_pp = {0: 0, **{i: rom[self.tables.moves + (i - 1) * 6 + 5] for i in range(1, 166)}}
         self.species = self.read_species()
         self.by_dex = sorted(self.species.values(), key=lambda s: s.dex)
         self.parents = {target: (mon.id, kind, param) for mon in self.by_dex
                         for kind, param, target in mon.evolve}
-        self.minimum_levels = self.read_minimum_levels()
+        self.minimum_levels = self.read_minimum_levels() if self.verified else {}
         self.items = self.read_items()
 
     @classmethod
@@ -105,33 +111,28 @@ class Catalog:
     def read_names(self, address: int, count: int) -> dict[int, str]:
         result = {}
         for i in range(1, count + 1):
-            end = self.rom.index(0x50, address)
+            end = self.rom.find(b"\x50", address, address + 64)
+            if end < 0:
+                raise ValueError("ROM 名称表缺少结束符。")
             result[i] = self.charset.decode(self.rom[address:end], rom_text=True)
             address = end + 1
         return result
 
     def read_species(self) -> dict[int, Species]:
         data = self.rom
+        tables = self.tables
         result = {}
-        for id_, dex in enumerate(data[0x40FC2:0x40FC2 + 190], 1):
+        species_ids = {i + 1 for i, n in enumerate(data[tables.dex:tables.dex + 190]) if n}
+        for id_, dex in enumerate(data[tables.dex:tables.dex + 190], 1):
             if dex == 0:
                 continue
-            base_offset = 0x4262 if dex == 151 else 0x383DE + (dex - 1) * 28
+            base_offset = tables.mew if dex == 151 else tables.bases + (dex - 1) * 28
             base = data[base_offset:base_offset + 28]
-            name_offset = 0x1C98A + (id_ - 1) * 10
+            name_offset = tables.species_names + (id_ - 1) * 10
             name = data[name_offset:name_offset + 10]
-            pointer = rom_address(0x0E, word(data, 0x3B01E + (id_ - 1) * 2))
-            evolutions = []
-            while (kind := data[pointer]) != 0:
-                size = 4 if kind == 2 else 3
-                evolutions.append((kind, data[pointer + 1], data[pointer + size - 1]))
-                pointer += size
-            pointer += 1
-            learned = []
-            while data[pointer]:
-                learned.append((data[pointer], data[pointer + 1]))
-                pointer += 2
-            machines = frozenset(data[0x1391B + j] for j in range(55) if base[20 + j // 8] & (1 << (j % 8)))
+            pointer = word(data, tables.evolutions + (id_ - 1) * 2)
+            evolutions, learned = read_evolution(data, pointer, tables.evolutions // 0x4000, species_ids)
+            machines = frozenset(data[tables.machines + j] for j in range(55) if base[20 + j // 8] & (1 << (j % 8)))
             result[id_] = Species(
                 id_, dex, self.charset.decode(name), name + b"\x50", tuple(base[1:6]),
                 base[6:8], base[8], base[19], tuple(base[15:19]), tuple(learned),
@@ -189,21 +190,21 @@ class Catalog:
                 return levels
 
     def read_items(self) -> dict[int, Item]:
-        names = self.read_names(0x470E, 83)
+        names = self.read_names(self.tables.item_names, 83)
         result = {}
         for i, n in names.items():
-            key = bool(self.rom[0xE7DB + (i - 1) // 8] & (1 << ((i - 1) % 8)))
+            key = i in KEY_ITEMS
             result[i] = Item(i, n, key, ITEM_DISABLED.get(i, ""))
         for i in range(0xC4, 0xFB):
             hm = i < 0xC9
             num = i - (0xC4 if hm else 0xC9)
-            move = self.rom[0x1391B + (50 if hm else 0) + num]
+            move = self.rom[self.tables.machines + (50 if hm else 0) + num]
             result[i] = Item(i, f"{'HM' if hm else 'TM'}{num + 1:02d} {self.moves[move]}", hm, "")
         return result
 
     def experience(self, species: int, level: int) -> int:
         growth = self.species[species].growth
-        at = 0x59015 + growth * 4
+        at = self.tables.growth + growth * 4
         cubic, square, linear, constant = self.rom[at:at + 4]
         squared = -(square & 0x7F) if square & 0x80 else square
         return max(0, (cubic >> 4) * level**3 // (cubic & 15) + squared * level**2 + linear * level - constant)

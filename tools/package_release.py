@@ -47,7 +47,7 @@ def main():
     top_level = (".gitignore", "LICENSE", "README.md", "main.py", "build.ps1", NAME + ".spec",
                  "requirements.txt", "requirements-dev.txt")
     source_files = [PROJECT / name for name in top_level]
-    for part in ("docs", "editor", "tests", "tools"):
+    for part in (".github", "docs", "editor", "tests", "tools"):
         source_files.extend(all_files(PROJECT / part))
     source = archive(NAME + "_Source", PROJECT, source_files)
     hashes = []

@@ -32,7 +32,7 @@ def differences(before, after):
 
 
 def format_checks(catalog, atlas, before, after, fresh):
-    expect_error(ValueError, "SHA-256", Catalog, b"\0" * 0x200000)
+    expect_error(ValueError, "ROM", Catalog, b"\0" * 0x200000)
     for raw in (before, after, fresh):
         Save(catalog, raw, atlas.areas)
     expect_error(InvalidSave, "32,768", Save, catalog, after[:-1])

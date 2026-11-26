@@ -146,3 +146,45 @@ class Charset:
         if len(data) > NAME_BYTES - 1:
             raise ValueError(f"昵称用了 {len(data)} 字节，最多可用 10 字节（一般每个汉字 2 字节）。")
         return data.ljust(NAME_BYTES, bytes((END,)))
+
+
+class SingleByteCharset:
+    """The international games use single-byte names with language-specific glyphs."""
+    def __init__(self, language: str):
+        self.single = SINGLE.copy()
+        self.single.update({0x70: "‘", 0x71: "’", 0x72: "“", 0x73: "”", 0x75: "…"})
+        if language in ("fr", "de"):
+            self.single.update({0xBA + i: c for i, c in enumerate("àèéùßçÄÖÜäöüëïâôûêî")})
+            self.single.update({0xD4 + i: c for i, c in enumerate(
+                ("c'", "d'", "j'", "l'", "m'", "n'", "p'", "s'", "'s", "t'", "u'", "y'"))})
+            self.single[0xE4] = "+"
+        elif language in ("es", "it"):
+            self.single.update({0xBA + i: c for i, c in enumerate("àèéùÀÁÄÖÜäöüÈÉÌÍÑÒÓÙÚáìíñòóúº&")})
+            self.single.update({0xD8 + i: c for i, c in enumerate(("\u0027d", "'l", "'m", "'r", "'s", "'t", "'v"))})
+            self.single.update({0xE4: "¿", 0xE5: "¡"})
+        if language == "it":
+            self.single[0xF0] = "$"
+        self.encoding = {c: bytes((i,)) for i, c in self.single.items() if len(c) == 1}
+
+    def decode(self, data: bytes, *, rom_text: bool = False) -> str:
+        return "".join(self.single.get(v, TEXT_TOKEN.get(v, f"〈{v:02X}〉"))
+                       for v in data.split(bytes((END,)), 1)[0])
+
+    @staticmethod
+    def string_end(data: bytes) -> int | None:
+        return data.index(END) if END in data else None
+
+    def valid_stored_name(self, data: bytes) -> bool:
+        end = self.string_end(data)
+        return end is not None and end > 0
+
+    def nickname(self, text: str) -> bytes:
+        if not text.strip():
+            raise ValueError("请输入昵称。")
+        for char in text:
+            if char not in self.encoding:
+                raise ValueError(f"此语言的 ROM 字库中没有可用于昵称的字符「{char}」。")
+        data = b"".join(self.encoding[c] for c in text)
+        if len(data) > NAME_BYTES - 1:
+            raise ValueError(f"昵称用了 {len(data)} 字节，最多可用 10 字节。")
+        return data.ljust(NAME_BYTES, bytes((END,)))

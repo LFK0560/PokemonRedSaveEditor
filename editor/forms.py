@@ -227,7 +227,8 @@ class MonDialog(EditorDialog):
 
     def nickname_info(self):
         if self.name.text() == self.mon.nickname and self.slot is not None:
-            self.name_count.setText("昵称保留原编码。修改时最多输入 10 字节（通常为 5 个汉字）。")
+            self.name_count.setText("昵称保留原编码。修改时最多输入 10 字节（通常为 5 个汉字）。" if self.catalog.verified else
+                                    "昵称保留原编码。修改时最多输入 10 个本语言字库中的单字节字符。")
             return
         try:
             name = self.catalog.charset.nickname(self.name.text())

@@ -253,7 +253,7 @@ class MainWindow(QWidget):
         t = QVBoxLayout()
         name = label(TITLE, "appTitle")
         t.addWidget(name)
-        t.addWidget(label("简体中文版 · Windows 离线", "muted"))
+        t.addWidget(label("Windows 离线 · 国际版兼容测试", "muted"))
         l.addLayout(t, 1)
         self.rom_button = button("选择 ROM…", "openRom", self.choose_rom)
         self.open_button = button("导入存档…", "openSave", self.choose_save)
@@ -344,15 +344,15 @@ class MainWindow(QWidget):
     def choose_rom(self):
         if not self.allow_leave():
             return
-        path = self.dialog("选择《口袋妖怪红》的本地 ROM", "romFolder", "Game Boy ROM (*.gb *.gbc);;所有文件 (*)")
+        path = self.dialog("选择红、蓝、黄版的本地 ROM", "romFolder", "Game Boy ROM (*.gb *.gbc);;所有文件 (*)")
         if path:
             self.load_rom(path)
 
     def load_rom(self, path: Path):
         try:
             catalog = Catalog.load(path)
-            atlas = Atlas(catalog)
-            index = EventIndex(atlas)
+            atlas = Atlas(catalog) if catalog.verified else None
+            index = EventIndex(atlas) if atlas else None
         except (OSError, ValueError) as exc:
             self.tell(f"ROM 无法打开 · {exc}")
             message(self, "ROM 校验未通过", exc)
@@ -360,25 +360,31 @@ class MainWindow(QWidget):
         self.rom_path = path.resolve()
         self.catalog = catalog
         self.atlas = atlas
-        self.maps.setup(atlas, index)
-        self.map_slot.setCurrentWidget(self.maps)
+        if atlas:
+            self.maps.setup(atlas, index)
+            self.map_slot.setCurrentWidget(self.maps)
+        else:
+            self.maps.set_save(None)
+            self.map_empty.setText("此 ROM 已启用队伍、精灵箱及道具的兼容测试。\n地图与事件的 ROM 脚本适配仍在开发。")
+            self.map_slot.setCurrentWidget(self.map_empty)
         self.document = None
         self.changes.clear()
         self.last_backup = None
         self.refresh()
-        self.tell("ROM 校验通过。可导入 .srm 存档，也可以先浏览地图。")
+        self.tell("ROM 校验通过。可导入 .srm 存档，也可以先浏览地图。" if atlas else
+                  "国际版兼容测试已启用。可导入 .srm 或 .sav。反馈问题时请附 ROM 版本及 SHA-256。")
         return True
 
     def choose_save(self):
         if not self.catalog or not self.allow_leave():
             return
-        path = self.dialog("导入《口袋妖怪红》存档", "saveFolder", "游戏存档 (*.srm *.srm.bak);;所有文件 (*)")
+        path = self.dialog("导入游戏存档", "saveFolder", "游戏存档 (*.srm *.sav *.srm.bak *.sav.bak);;所有文件 (*)")
         if path:
             self.load_save(path)
 
     def load_save(self, path: Path):
         try:
-            document = Document.load(path, self.catalog, self.atlas.areas)
+            document = Document.load(path, self.catalog, self.atlas.areas if self.atlas else None)
         except (OSError, ValueError) as exc:
             self.tell(f"导入失败 · {exc}")
             message(self, "无法导入存档", exc)
@@ -395,10 +401,10 @@ class MainWindow(QWidget):
     def refresh(self):
         doc = self.document
         model = doc.model if doc else None
-        self.rom_label.setText(f"ROM · {self.rom_path.name}  |  SHA-256 已核对" if self.rom_path else "尚未选择 ROM")
-        self.rom_label.setToolTip(str(self.rom_path) if self.rom_path else "")
+        self.rom_label.setText(f"ROM · {self.rom_path.name}  |  {self.catalog.version}" if self.rom_path else "尚未选择 ROM")
+        self.rom_label.setToolTip(f"{self.rom_path}\nSHA-256 · {self.catalog.sha256}" if self.rom_path else "")
         if doc:
-            map_name = self.atlas.areas[model.map_id].title
+            map_name = self.atlas.areas[model.map_id].title if self.atlas else f"地图 {model.map_id:02X}"
             self.doc_label.setText(f"{model.player}  ·  {map_name}  |  {doc.path.name}")
             self.doc_label.setToolTip(str(doc.path))
         else:
@@ -412,7 +418,7 @@ class MainWindow(QWidget):
         self.dirty_label.setText("有待保存改动" if model and model.dirty else "存档已导入" if model else "未导入")
         self.mons.set_model(model)
         self.items.set_model(model)
-        self.maps.set_save(model)
+        self.maps.set_save(model if self.atlas else None)
 
     def applied(self, summary):
         self.changes.append(summary)
@@ -441,9 +447,10 @@ class MainWindow(QWidget):
         if not self.document:
             return False
         current = self.document.path
-        raw_name = current.name[:-8] if current.name.lower().endswith(".srm.bak") else current.stem
-        path = self.dialog("另存存档", "saveFolder", "游戏存档 (*.srm);;所有文件 (*)",
-                           save=True, suggested=raw_name + "_编辑.srm")
+        raw_name = current.stem[:-4] if current.name.lower().endswith((".srm.bak", ".sav.bak")) else current.stem
+        suffix = ".sav" if current.name.lower().endswith((".sav", ".sav.bak")) else ".srm"
+        path = self.dialog("另存存档", "saveFolder", "游戏存档 (*.srm *.sav);;所有文件 (*)",
+                           save=True, suggested=raw_name + "_编辑" + suffix)
         if not path:
             return False
         try:

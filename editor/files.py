@@ -62,7 +62,9 @@ def move_new(staged: Path, destination: Path) -> None:
 def backup(path: Path, data: bytes, *, overwrite: bool = False, day: date | None = None) -> Path:
     folder = path.parent / "备份" / (day or date.today()).isoformat()
     folder.mkdir(parents=True, exist_ok=True)
-    ext = ".srm.bak" if path.name.lower().endswith(".srm.bak") else path.suffix
+    ext = path.suffix
+    if path.name.lower().endswith((".srm.bak", ".sav.bak")):
+        ext = path.name[-8:]
     stem = path.name[:-len(ext)] if ext else path.name
     if overwrite:
         stem += "_覆盖前"
