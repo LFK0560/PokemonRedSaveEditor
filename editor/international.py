@@ -1,7 +1,7 @@
 """Locate the common Generation I tables in international Red, Blue and Yellow."""
 from dataclasses import dataclass
 
-from .charset import SingleByteCharset
+from .charset import JapaneseCharset, SingleByteCharset
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class RomTables:
     machines: int
     growth: int
     evolutions: int
+    name_stride: int = 10
 
 
 CHINESE_TABLES = RomTables(
@@ -99,21 +100,22 @@ def find_evolutions(rom: bytes, bases: int, dex: bytes) -> int:
 
 
 def discover(rom: bytes):
-    if len(rom) not in (0x100000, 0x200000):
-        raise ValueError("国际版兼容模式接受 1 MiB 或 2 MiB 的红、蓝、黄版 ROM。")
+    if len(rom) < 0x80000:
+        raise ValueError("未定位原版数据表，改用参考资料。")
     title = rom[0x134:0x143].split(b"\0", 1)[0].decode("ascii", errors="replace")
     if not title.startswith(("POKEMON", "POCKET MONS")):
         raise ValueError("ROM 文件头不是国际版红、蓝、黄。")
-    if rom[0x14A] != 1:
-        raise ValueError("当前兼容模式面向国际版红、蓝、黄，日版暂未适配。")
-    if not any(name in title for name in ("RED", "BLUE", "YELLOW", "ROUGE", "BLEU", "ROT", "BLAU", "ROSS", "ROJ", "AZUL", "GELB", "JAUNE", "GIAL", "AMAR")):
+    japanese = rom[0x14A] == 0
+    if not any(name in title for name in ("RED", "GREEN", "BLUE", "YELLOW", "ROUGE", "BLEU", "ROT", "BLAU", "ROSS", "ROJ", "AZUL", "GELB", "JAUNE", "GIAL", "AMAR")):
         raise ValueError(f"无法识别 ROM 标题「{title}」。")
     if ((-sum(rom[0x134:0x14D]) - 25) & 255) != rom[0x14D]:
         raise ValueError("ROM 文件头校验错误。")
     selected = []
-    for language, label, first, second, move, item in LANGUAGES:
-        codec = SingleByteCharset(language)
-        names_signature = codec.nickname(first)[:10] + codec.nickname(second)[:10]
+    languages = (("ja", "日文", "サイドン", "ガルーラ", "はたく", "マスターボール"),) if japanese else LANGUAGES
+    stride = 5 if japanese else 10
+    for language, label, first, second, move, item in languages:
+        codec = JapaneseCharset() if japanese else SingleByteCharset(language)
+        names_signature = codec.nickname(first)[:stride] + codec.nickname(second)[:stride]
         names = rom.find(names_signature)
         moves = rom.find(codec.nickname(move)[:len(move)] + b"\x50")
         if names >= 0 and moves >= 0:
@@ -141,5 +143,5 @@ def discover(rom: bytes):
     growth = unique(rom, bytes.fromhex("11000000340a001e34140046658f648c4500000054000000"), "经验成长表")
     evolutions = find_evolutions(rom, bases, dex_data)
     revision = rom[0x14C]
-    tables = RomTables(names, move_names, item_names, moves, bases, mew, dex, machines, growth, evolutions)
-    return tables, codec, f"{title} · {language} · Rev {revision} · 兼容测试"
+    tables = RomTables(names, move_names, item_names, moves, bases, mew, dex, machines, growth, evolutions, stride)
+    return tables, codec, f"{title} · {language} · Rev {revision} · 未认证"

@@ -46,6 +46,7 @@ def gb2312_characters(first: int, stop: int) -> list[str]:
 
 
 class Charset:
+    name_bytes = 11
     def __init__(self, rom: bytes):
         self.rom = rom
 
@@ -151,6 +152,7 @@ class Charset:
 class SingleByteCharset:
     """The international games use single-byte names with language-specific glyphs."""
     def __init__(self, language: str):
+        self.name_bytes = 11
         self.single = SINGLE.copy()
         self.single.update({0x70: "‘", 0x71: "’", 0x72: "“", 0x73: "”", 0x75: "…"})
         if language in ("fr", "de"):
@@ -188,3 +190,36 @@ class SingleByteCharset:
         if len(data) > NAME_BYTES - 1:
             raise ValueError(f"昵称用了 {len(data)} 字节，最多可用 10 字节。")
         return data.ljust(NAME_BYTES, bytes((END,)))
+
+
+class JapaneseCharset(SingleByteCharset):
+    def __init__(self):
+        self.name_bytes = 6
+        self.single = {0x7F: " ", 0xE3: "ー", 0xE4: "゜", 0xE5: "゛",
+                       0xE6: "？", 0xE7: "！", 0xE8: "。", 0xEF: "♂", 0xF0: "円",
+                       0xF1: "×", 0xF2: "．", 0xF3: "／", 0xF5: "♀"}
+        for start, chars in (
+            (0x05, "ガギグゲゴザジズゼゾダヂヅデド"), (0x19, "バビブボ"),
+            (0x26, "がぎぐげござじずぜぞだぢづでど"), (0x3A, "ばびぶベぼ"),
+            (0x40, "パピプポぱぴぷペぽ"), (0x6E, "ぃぅ「」『』・…ぁぇぉ"),
+            (0x80, "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフホマミムメモヤユヨラルレロワヲンッャュョ"),
+            (0xB0, "ィあいうえおかきくけこさしすせそたちつてとなにぬねのはひふヘほまみむめもやゆよらリるれろわをんっゃゅょ"),
+            (0xE9, "ァゥェ"), (0xF4, "ォ"), (0xF6, "０１２３４５６７８９"),
+        ):
+            self.single.update({start+i: char for i, char in enumerate(chars)})
+        self.encoding = {c: bytes((i,)) for i, c in self.single.items()}
+        # These kana share a glyph with the other syllabary in the cartridge.
+        for alias, stored in (("ヘ", "ヘ"), ("へ", "ヘ"), ("リ", "リ"), ("り", "リ"),
+                              ("ベ", "ベ"), ("べ", "ベ"), ("ペ", "ペ"), ("ぺ", "ペ")):
+            self.encoding[alias] = self.encoding[stored]
+
+    def nickname(self, text):
+        if not text.strip():
+            raise ValueError("请输入昵称。")
+        try:
+            data = b"".join(self.encoding[c] for c in text)
+        except KeyError as exc:
+            raise ValueError(f"日版字库没有字符「{exc.args[0]}」。") from None
+        if len(data) > 5:
+            raise ValueError("日版昵称最多 5 个单字节字符。")
+        return data.ljust(6, b"\x50")

@@ -19,26 +19,16 @@ def export(rom: Path, destination: Path):
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(("地图 ID", "地图", "对象 / 事件索引", "X", "Y", "类别", "名称", "复位支持",
-                         "清除的 SRAM 位", "仅观察的 SRAM 位", "存档条件", "禁用原因", "证据"))
+        writer.writerow(("地图 ID", "地图", "对象 / 事件索引", "X", "Y", "类别", "名称", "认证",
+                         "编辑方式", "清除的国际版参考位", "影响说明", "证据"))
         for e in index.by_key.values():
-            conditions = []
             if e.flags:
-                state = "支持单独复位"
-                conditions.append("主区校验有效且所列清除位均已设置")
-            elif e.cooperative:
-                state = "可重复互动"
-            elif "待验证" in e.disabled:
-                state = "复位规则待验证"
+                state = "开放复位"
             else:
-                state = "禁用"
-            if e.idle_at is not None:
-                conditions.append(f"地图脚本状态 0x{e.idle_at:04X} 为 0")
-            if e.requires_clear:
-                conditions.append(f"{bit_list(e.requires_clear)} 为 0")
+                state = "自定义关联 / 直接编辑标记"
             area = index.atlas.areas[e.map_id]
             writer.writerow((f"0x{area.id:02X}", area.title, e.id, e.x, e.y, CATEGORIES[e.kind],
-                             e.name, state, bit_list(e.flags), bit_list(e.observed), "。".join(conditions),
+                             e.name, "已认证规则" if e.certified else "未认证", state, bit_list(e.flags),
                              e.disabled, e.evidence))
     print(f"Exported {len(index.by_key)} event rows to {destination}")
 

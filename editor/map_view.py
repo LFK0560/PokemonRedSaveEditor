@@ -2,7 +2,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QRectF, QSettings, Qt, QTimer
+import json
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QGraphicsScene, QGraphicsView, QHBoxLayout,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from .events import CATEGORIES, Event, EventIndex
+from .flag_editor import BindingEditor, FlagEditor
 from .maps import Atlas
 from .style import ACCENT, GOLD, RED, label, message
 
@@ -166,9 +168,13 @@ class MapPage(QWidget):
         self.area = None
         self.open_event: Event | None = None
         self.travel = []
+        self.binding_scope = None
+        self.settings = QSettings("OfflineTools", "PokemonRedSaveEditor")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(10)
+        self.map_note = label("", "muted", True)
+        outer.addWidget(self.map_note)
         controls = QHBoxLayout()
         self.overview_tab = QPushButton("城镇地图")
         self.overview_tab.setObjectName("townMap")
@@ -196,6 +202,9 @@ class MapPage(QWidget):
         controls.addStretch(1)
         controls.addWidget(self.area_combo, 2)
         controls.addWidget(self.locate)
+        self.flags_button = QPushButton("事件标记")
+        self.flags_button.clicked.connect(self.edit_flags)
+        controls.addWidget(self.flags_button)
         outer.addLayout(controls)
 
         split = QSplitter()
@@ -254,8 +263,11 @@ class MapPage(QWidget):
         self.reset_button.setProperty("primary", True)
         self.reset_button.clicked.connect(self.reset_event)
         self.reset_button.setEnabled(False)
+        self.binding_button = QPushButton("关联标记…")
+        self.binding_button.clicked.connect(self.edit_binding)
         for widget in (self.target_name, self.target_info, self.target_state, self.reason, self.reset_button):
             side.addWidget(widget)
+        side.addWidget(self.binding_button)
         split.addWidget(detail)
         split.setStretchFactor(0, 4)
         split.setStretchFactor(1, 1)
@@ -267,6 +279,12 @@ class MapPage(QWidget):
 
     def setup(self, atlas, index):
         self.atlas, self.index = atlas, index
+        self.base_events = index.by_key.copy()
+        self.binding_scope = None
+        self.open_event = None
+        self.map_note.setText("✓ 地图数据已认证" if atlas.catalog.verified else
+                              "未认证 · 地图与事件已开放。格网底图为参考定位图，事件关联可自行调整。" if atlas.reference_areas or not atlas.tables or atlas.tables.tilesets is None else
+                              "未认证 · 地图读取自所选 ROM，事件使用可编辑的通用参考关联。")
         self.travel.clear()
         self.area_combo.blockSignals(True)
         self.area_combo.clear()
@@ -390,7 +408,7 @@ class MapPage(QWidget):
 
     def choose_marker(self, marker):
         if isinstance(marker.value, Event):
-            e = marker.value
+            e = self.index.by_key.get(marker.value.key, marker.value)
             if self.canvas is self.world_canvas:
                 self.area = e.map_id
                 self.sync_controls()
@@ -477,10 +495,28 @@ class MapPage(QWidget):
 
     def set_save(self, save):
         self.save = save
+        if save and self.index:
+            scope = f"eventBindings/{self.atlas.catalog.sha256 or 'reference'}/{save.profile.name}"
+            if scope != self.binding_scope:
+                self.index.by_key = self.base_events.copy()
+                self.index.by_map = {id_: tuple(e for e in self.base_events.values() if e.map_id == id_)
+                                     for id_ in self.atlas.areas}
+                try:
+                    for row in json.loads(self.settings.value(scope, "[]")):
+                        key = (row[0], row[1])
+                        flags = tuple(tuple(v) for v in row[2])
+                        if key in self.index.by_key and all(0x2852 <= a < 0x2B33 and 1 <= b <= 255 for a, b in flags):
+                            self.index.set_binding(key, flags)
+                except (ValueError, TypeError, IndexError):
+                    pass
+                self.binding_scope = scope
         self.locate.setEnabled(bool(save))
+        self.flags_button.setEnabled(bool(save))
         self.refresh()
 
     def refresh(self):
+        if self.open_event and self.index:
+            self.open_event = self.index.by_key.get(self.open_event.key)
         self.update_list()
         self.select_event(self.open_event)
 
@@ -498,7 +534,8 @@ class MapPage(QWidget):
             pool = [e for e in self.index.by_key.values() if e.kind == "fixed" or e.kind == "leader"]
         for e in pool:
             state = e.status(self.save)
-            name = f"{e.name}  ·  {state}"
+            badge = "✓ 已认证" if e.certified_for(self.save) else "未认证"
+            name = f"{e.name}  ·  {badge} · {state}"
             if q or self.area is None:
                 name = f"{self.atlas.areas[e.map_id].title} / {name}"
             item = QListWidgetItem(name, self.list)
@@ -524,18 +561,22 @@ class MapPage(QWidget):
         self.target_state.setVisible(bool(event))
         self.target_info.setVisible(bool(event))
         self.reason.setVisible(bool(event))
-        self.reset_button.setEnabled(bool(event and event.can_reset(self.save)))
+        self.reset_button.setEnabled(bool(event and self.save))
+        self.binding_button.setEnabled(bool(event and self.save))
+        self.reset_button.setText("复位此事件" if event and event.flags else "设置关联标记")
         if not event:
             self.target_name.setText("点击地图标记或在列表中选择目标。")
             return
-        self.target_name.setText(event.name)
+        self.target_name.setText(event.name + (" · ✓ 已认证" if event.certified_for(self.save) else " · 未认证"))
         self.target_info.setText(f"{CATEGORIES[event.kind]} · {event.map_id:02X}:{event.id} · ({event.x}, {event.y})")
         state = event.status(self.save)
         self.target_state.setText(state)
         self.target_state.setStyleSheet("color: " + (RED if "无法" in state else GOLD if "待验证" in state else ACCENT))
-        reason = event.disabled
+        reason = ("影响说明：" + event.disabled) if event.disabled else ""
         if not reason:
-            if state == "已完成":
+            if not event.certified_for(self.save):
+                reason = "可按当前关联清除标记；也可自行调整关联。此事件在当前版本的触发结果未认证。"
+            elif state == "已完成":
                 reason = "可清除此目标的独立标记，在原位置重新触发。"
             elif state == "可触发":
                 reason = "当前存档已可触发此事件。"
@@ -545,12 +586,17 @@ class MapPage(QWidget):
                 reason = "此处尚有进行中的地图脚本。请在游戏中结束剧情后存档。"
             elif state == "旗标状态不一致":
                 reason = "战斗完成与显隐记录不一致，请用游戏确认当前剧情。"
-        self.reason.setText(reason)
+        association = ", ".join(f"0x{self.save.profile.reference_offset(a) if self.save else a:04X}:0x{b:02X}"
+                                for a, b in event.flags)
+        self.reason.setText(reason + ("\n关联标记：" + association if association else "\n没有独立关联，可自行填写或使用事件标记编辑。"))
         self.reason.setToolTip(event.evidence)
 
     def reset_event(self):
         event = self.open_event
         if not (event and self.save):
+            return
+        if not event.flags:
+            self.edit_binding()
             return
         try:
             changed = event.reset(self.save)
@@ -559,3 +605,23 @@ class MapPage(QWidget):
             return
         if changed:
             self.applied(f"复位 {self.atlas.areas[event.map_id].title} · {event.name}")
+
+    def edit_flags(self):
+        if not self.save:
+            return
+        dialog = FlagEditor(self, self.save)
+        if dialog.exec() and dialog.changed:
+            self.applied("编辑事件标记")
+        dialog.deleteLater()
+
+    def edit_binding(self):
+        if not self.save or not self.open_event:
+            return
+        dialog = BindingEditor(self, self.open_event, self.save)
+        if dialog.exec():
+            self.open_event = self.index.set_binding(self.open_event.key, dialog.bindings)
+            rows = [[key[0], key[1], e.flags] for key, e in self.index.by_key.items()
+                    if e != self.base_events.get(key)]
+            self.settings.setValue(self.binding_scope, json.dumps(rows))
+            self.refresh()
+        dialog.deleteLater()

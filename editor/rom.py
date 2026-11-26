@@ -1,13 +1,19 @@
 from dataclasses import dataclass
-from hashlib import sha256
+from hashlib import sha1, sha256
 from math import isqrt
 from pathlib import Path
+import json
 
-from .charset import Charset
+from .charset import Charset, JapaneseCharset, SingleByteCharset
 from .international import CHINESE_TABLES, KEY_ITEMS, discover, read_evolution
 
 
 ROM_HASH = "f4092c50b04a0c471c8e1cda4af1551ac451c754be8ae03f86430c9c0dc0e073"
+CORE_CERTIFIED_SHA1 = {
+    "ea9bcae617fdf159b045185467ae58b2e4a48b9a",  # English Red
+    "d7037c83e1ae5b39bde3c30787637ba1d4c48ce2",  # English Blue
+    "cc7d03262ebfaf2f06772c1a480c7d9d5f4a38e1",  # English Yellow
+}
 
 ITEM_DISABLED = {
     0x07: "废弃的冲浪板会绕过野外通行限制。",
@@ -85,15 +91,33 @@ class Item:
 
 class Catalog:
     def __init__(self, rom: bytes):
+        if len(rom) < 0x150:
+            raise ValueError("ROM 文件太短，无法读取 Game Boy 文件头。")
         self.sha256 = sha256(rom).hexdigest()
         self.verified = self.sha256 == ROM_HASH
+        self.core_certified = self.verified or sha1(rom).hexdigest() in CORE_CERTIFIED_SHA1
+        self.japanese = not self.verified and rom[0x14A] == 0
+        self.has_rom = True
+        self.reference_only = False
+        self.metadata_note = ""
         if self.verified:
             self.tables = CHINESE_TABLES
             self.charset = Charset(rom)
-            self.version = "简体中文红版 · 已验证"
+            self.version = "简体中文红版 · ✓ ROM 已认证"
         else:
-            self.tables, self.charset, self.version = discover(rom)
+            try:
+                self.tables, self.charset, self.version = discover(rom)
+            except (ValueError, IndexError, KeyError) as exc:
+                fallback = self.reference(self.japanese)
+                digest = self.sha256
+                self.__dict__.update(fallback.__dict__)
+                self.rom, self.sha256, self.has_rom = rom, digest, True
+                self.metadata_note = str(exc)
+                title = rom[0x134:0x143].split(b"\0", 1)[0].decode("ascii", errors="replace")
+                self.version = f"{title} · 未认证 · 参考资料"
+                return
         self.rom = rom
+        self.growth_coefficients = [tuple(rom[self.tables.growth+i*4:self.tables.growth+i*4+4]) for i in range(6)]
         self.moves = {0: "— 空招式 —", **self.read_names(self.tables.move_names, 165)}
         self.base_pp = {0: 0, **{i: rom[self.tables.moves + (i - 1) * 6 + 5] for i in range(1, 166)}}
         self.species = self.read_species()
@@ -102,11 +126,61 @@ class Catalog:
                         for kind, param, target in mon.evolve}
         self.minimum_levels = self.read_minimum_levels() if self.verified else {}
         self.items = self.read_items()
+        if self.core_certified and not self.verified:
+            self.version = self.version.replace("未认证", "✓ 核心字段已认证")
 
     @classmethod
     def load(cls, path: Path) -> "Catalog":
         with path.open("rb") as source:
-            return cls(source.read(0x200001))
+            raw = source.read(0x800001)
+        try:
+            return cls(raw)
+        except (ValueError, IndexError, KeyError, ZeroDivisionError) as exc:
+            if len(raw) < 0x150:
+                raise ValueError("ROM 文件太短，无法读取 Game Boy 文件头。") from exc
+            result = cls.reference(raw[0x14A] == 0)
+            result.rom, result.has_rom = raw, True
+            result.sha256 = sha256(raw).hexdigest()
+            title = raw[0x134:0x143].split(b"\0", 1)[0].decode("ascii", errors="replace")
+            result.version = f"{title} · 未认证 · 参考资料"
+            result.metadata_note = str(exc)
+            return result
+
+    @classmethod
+    def reference(cls, japanese=False):
+        data = json.loads(Path(__file__).with_name("reference.json").read_text(encoding="utf-8"))
+        result = cls.__new__(cls)
+        result.rom, result.sha256, result.tables = b"", "", None
+        result.verified, result.core_certified, result.has_rom, result.reference_only = False, False, False, True
+        result.japanese, result.metadata_note = japanese, ""
+        result.charset = JapaneseCharset() if japanese else SingleByteCharset("en")
+        result.version = "参考资料 · 未认证"
+        result.moves = {int(k): v for k, v in data["moves"].items()}
+        result.base_pp = {int(k): v for k, v in data["base_pp"].items()}
+        result.species = {}
+        result.default_names = {}
+        for fields in data["species"]:
+            fields = fields.copy()
+            name = fields.pop("default_name")
+            for key in ("base", "starter_moves"):
+                fields[key] = tuple(fields[key])
+            for key in ("level_moves", "evolve"):
+                fields[key] = tuple(tuple(v) for v in fields[key])
+            fields["types"], fields["raw_name"] = bytes(fields["types"]), bytes(fields["raw_name"])
+            fields["machines"] = frozenset(fields["machines"])
+            mon = Species(**fields)
+            result.species[mon.id] = mon
+            result.default_names[mon.id] = "ポケモン" if japanese else name
+        result.by_dex = sorted(result.species.values(), key=lambda s: s.dex)
+        result.parents = {target: (mon.id, kind, parameter) for mon in result.by_dex
+                          for kind, parameter, target in mon.evolve}
+        result.minimum_levels = {}
+        result.items = {v["id"]: Item(**v) for v in data["items"]}
+        result.growth_coefficients = data["growth"]
+        return result
+
+    def default_nickname(self, species):
+        return self.default_names[species] if self.reference_only else self.species[species].name
 
     def read_names(self, address: int, count: int) -> dict[int, str]:
         result = {}
@@ -128,8 +202,8 @@ class Catalog:
                 continue
             base_offset = tables.mew if dex == 151 else tables.bases + (dex - 1) * 28
             base = data[base_offset:base_offset + 28]
-            name_offset = tables.species_names + (id_ - 1) * 10
-            name = data[name_offset:name_offset + 10]
+            name_offset = tables.species_names + (id_ - 1) * tables.name_stride
+            name = data[name_offset:name_offset + tables.name_stride]
             pointer = word(data, tables.evolutions + (id_ - 1) * 2)
             evolutions, learned = read_evolution(data, pointer, tables.evolutions // 0x4000, species_ids)
             machines = frozenset(data[tables.machines + j] for j in range(55) if base[20 + j // 8] & (1 << (j % 8)))
@@ -204,8 +278,7 @@ class Catalog:
 
     def experience(self, species: int, level: int) -> int:
         growth = self.species[species].growth
-        at = self.tables.growth + growth * 4
-        cubic, square, linear, constant = self.rom[at:at + 4]
+        cubic, square, linear, constant = self.growth_coefficients[growth]
         squared = -(square & 0x7F) if square & 0x80 else square
         return max(0, (cubic >> 4) * level**3 // (cubic & 15) + squared * level**2 + linear * level - constant)
 

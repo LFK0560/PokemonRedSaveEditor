@@ -132,8 +132,8 @@ def check_gui(roms):
             file = Path(folder) / f"locale{i}.sav"
             file.write_bytes(fixture(window.catalog))
             assert window.load_save(file)
-            assert "兼容测试" in window.rom_label.text()
-            assert window.map_slot.currentWidget() is window.map_empty
+            assert path.name in window.rom_label.text()
+            assert window.map_slot.currentWidget() is window.maps
             dialog = MonDialog(window, window.document.model, None, None)
             dialog.show()
             app.processEvents()

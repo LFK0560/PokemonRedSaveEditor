@@ -32,7 +32,7 @@ def differences(before, after):
 
 
 def format_checks(catalog, atlas, before, after, fresh):
-    expect_error(ValueError, "ROM", Catalog, b"\0" * 0x200000)
+    assert Catalog(b"\0" * 0x200000).reference_only
     for raw in (before, after, fresh):
         Save(catalog, raw, atlas.areas)
     expect_error(InvalidSave, "32,768", Save, catalog, after[:-1])
@@ -116,7 +116,7 @@ def event_checks(catalog, atlas, before, after):
         assert atlas.floor_image(id_).size == (area.w * 32, area.h * 32)
     assert len(atlas.areas) == 226 and len(atlas.positions) == 36 and len(atlas.overview) == 60
     index = EventIndex(atlas)
-    enabled = [e for e in index.by_key.values() if e.flags]
+    enabled = [e for e in index.by_key.values() if e.certified]
     assert len(index.by_key) == 978 and len(enabled) == 416
     unique = set()
     for event in enabled:
@@ -147,12 +147,12 @@ def event_checks(catalog, atlas, before, after):
     ]
     assert not zapdos.reset(sample) and sample.data == after
     sample.data[0x285C] |= 0x20
-    assert zapdos.status(sample) == "旗标状态不一致" and not zapdos.can_reset(sample)
+    assert zapdos.status(sample) == "部分标记已设置" and zapdos.can_reset(sample)
     leader = index.by_key[0x36, "1"]
     assert leader.kind == "leader" and "徽章" in leader.disabled
-    expect_error(InvalidSave, "徽章", leader.reset, sample)
+    assert leader.can_reset(sample) and not leader.certified
     lift_guard = index.by_key[0xCA, "4"]
-    expect_error(InvalidSave, "钥匙", lift_guard.reset, sample)
+    assert lift_guard.can_reset(sample) and not lift_guard.certified
     one, two = index.by_key[0xD7, "H28"], index.by_key[0xD8, "H15"]
     assert (one.x, one.y) == (two.x, two.y) and one.flags != two.flags
     print(f"PASS all 226 map images, {len(enabled)} isolated event writes, floor identity and the exact Zapdos regression")

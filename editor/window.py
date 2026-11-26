@@ -124,12 +124,22 @@ class EditList(QWidget):
         if m is None:
             self.capacity.setText("等待导入存档")
             self.fill.setValue(0)
-            self.note.setText("选择受支持的 ROM 后，打开游戏内保存的 .srm 文件。")
+            self.note.setText("可直接导入 .srm 或 .sav。ROM 用于读取地图、名称资料及显示认证信息。")
             return
         location = self.location.currentData()
         if self.is_mon:
+            if self.location.count() != m.profile.box_count + 1:
+                selected = self.location.currentIndex()
+                self.location.blockSignals(True)
+                self.location.clear()
+                self.location.addItem("随身队伍", None)
+                for i in range(m.profile.box_count):
+                    self.location.addItem(f"精灵箱 {i+1:02d}", i)
+                self.location.setCurrentIndex(min(selected, m.profile.box_count))
+                self.location.blockSignals(False)
+                location = self.location.currentData()
             self.location.setItemText(0, "随身队伍")
-            for i in range(12):
+            for i in range(m.profile.box_count):
                 self.location.setItemText(i + 1, f"精灵箱 {i + 1:02d}" + (" · 当前箱" if i == m.current_box else ""))
             capacity = m.layout(location).capacity
             count = m.count(location)
@@ -253,7 +263,7 @@ class MainWindow(QWidget):
         t = QVBoxLayout()
         name = label(TITLE, "appTitle")
         t.addWidget(name)
-        t.addWidget(label("Windows 离线 · 国际版兼容测试", "muted"))
+        t.addWidget(label("Windows 离线 · 国际版 / 日版 · 开放编辑", "muted"))
         l.addLayout(t, 1)
         self.rom_button = button("选择 ROM…", "openRom", self.choose_rom)
         self.open_button = button("导入存档…", "openSave", self.choose_save)
@@ -305,7 +315,7 @@ class MainWindow(QWidget):
         self.pages.addTab(self.items, "道具")
         self.pages.addTab(self.map_slot, "地图与事件")
         work.addWidget(self.pages, 1)
-        self.status = label("请选择本地 ROM。", "muted")
+        self.status = label("可直接导入存档，也可选择本地 ROM 读取地图和认证资料。", "muted")
         self.status.setObjectName("fileStatus")
         self.status.setStyleSheet("color:#526860;")
         self.status.setWordWrap(True)
@@ -342,17 +352,15 @@ class MainWindow(QWidget):
         return path
 
     def choose_rom(self):
-        if not self.allow_leave():
-            return
-        path = self.dialog("选择红、蓝、黄版的本地 ROM", "romFolder", "Game Boy ROM (*.gb *.gbc);;所有文件 (*)")
+        path = self.dialog("选择本地 ROM（可选）", "romFolder", "Game Boy ROM (*.gb *.gbc);;所有文件 (*)")
         if path:
             self.load_rom(path)
 
     def load_rom(self, path: Path):
         try:
             catalog = Catalog.load(path)
-            atlas = Atlas(catalog) if catalog.verified else None
-            index = EventIndex(atlas) if atlas else None
+            atlas = Atlas(catalog)
+            index = EventIndex(atlas)
         except (OSError, ValueError) as exc:
             self.tell(f"ROM 无法打开 · {exc}")
             message(self, "ROM 校验未通过", exc)
@@ -360,23 +368,18 @@ class MainWindow(QWidget):
         self.rom_path = path.resolve()
         self.catalog = catalog
         self.atlas = atlas
-        if atlas:
-            self.maps.setup(atlas, index)
-            self.map_slot.setCurrentWidget(self.maps)
-        else:
-            self.maps.set_save(None)
-            self.map_empty.setText("此 ROM 已启用队伍、精灵箱及道具的兼容测试。\n地图与事件的 ROM 脚本适配仍在开发。")
-            self.map_slot.setCurrentWidget(self.map_empty)
-        self.document = None
-        self.changes.clear()
-        self.last_backup = None
+        self.maps.setup(atlas, index)
+        self.map_slot.setCurrentWidget(self.maps)
+        if self.document:
+            model = self.document.model
+            model.catalog = catalog if catalog.japanese == model.profile.japanese else Catalog.reference(model.profile.japanese)
         self.refresh()
-        self.tell("ROM 校验通过。可导入 .srm 存档，也可以先浏览地图。" if atlas else
-                  "国际版兼容测试已启用。可导入 .srm 或 .sav。反馈问题时请附 ROM 版本及 SHA-256。")
+        self.tell("ROM 和地图已载入，存档改动保留。认证仅作为提示，所有版本均可编辑事件。" +
+                  (f" 资料说明：{catalog.metadata_note}" if catalog.metadata_note else ""))
         return True
 
     def choose_save(self):
-        if not self.catalog or not self.allow_leave():
+        if not self.allow_leave():
             return
         path = self.dialog("导入游戏存档", "saveFolder", "游戏存档 (*.srm *.sav *.srm.bak *.sav.bak);;所有文件 (*)")
         if path:
@@ -384,12 +387,16 @@ class MainWindow(QWidget):
 
     def load_save(self, path: Path):
         try:
-            document = Document.load(path, self.catalog, self.atlas.areas if self.atlas else None)
+            document = Document.load(path, self.catalog or Catalog.reference())
         except (OSError, ValueError) as exc:
             self.tell(f"导入失败 · {exc}")
             message(self, "无法导入存档", exc)
             return False
         self.document = document
+        if self.atlas is None:
+            self.atlas = Atlas(document.model.catalog)
+            self.maps.setup(self.atlas, EventIndex(self.atlas))
+            self.map_slot.setCurrentWidget(self.maps)
         self.changes.clear()
         self.last_backup = document.import_backup
         self.mons.location.setCurrentIndex(0)
@@ -401,15 +408,16 @@ class MainWindow(QWidget):
     def refresh(self):
         doc = self.document
         model = doc.model if doc else None
-        self.rom_label.setText(f"ROM · {self.rom_path.name}  |  {self.catalog.version}" if self.rom_path else "尚未选择 ROM")
+        self.rom_label.setText(f"ROM · {self.rom_path.name}  |  {self.catalog.version}" if self.rom_path else "未选择 ROM · 使用未认证参考资料，可直接编辑存档")
         self.rom_label.setToolTip(f"{self.rom_path}\nSHA-256 · {self.catalog.sha256}" if self.rom_path else "")
         if doc:
-            map_name = self.atlas.areas[model.map_id].title if self.atlas else f"地图 {model.map_id:02X}"
-            self.doc_label.setText(f"{model.player}  ·  {map_name}  |  {doc.path.name}")
+            map_name = self.atlas.areas[model.map_id].title if self.atlas and model.map_id in self.atlas.areas else f"地图 {model.map_id:02X}"
+            badge = "✓ 核心字段已认证" if model.catalog.core_certified else "未认证"
+            self.doc_label.setText(f"{model.player} · {model.profile.name} · {badge} · {map_name}  |  {doc.path.name}")
             self.doc_label.setToolTip(str(doc.path))
         else:
             self.doc_label.setText("尚未导入存档")
-        self.open_button.setEnabled(self.catalog is not None)
+        self.open_button.setEnabled(True)
         enabled = doc is not None
         self.save_button.setEnabled(enabled)
         self.save_as_button.setEnabled(enabled)

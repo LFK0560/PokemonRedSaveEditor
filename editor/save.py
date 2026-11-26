@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 
 from .charset import NAME_BYTES
 from .rom import BLOCK_FINITE_ITEMS, Catalog, ITEM_UNIQUE, ITEM_UNUSUAL, QUEST_ITEMS, save_address
+from .profiles import INTERNATIONAL, JAPANESE, detect_profile
 
 
 SAVE_SIZE = 0x8000
@@ -33,16 +34,17 @@ def checksum(data: bytes | bytearray, start: int, end: int) -> int:
     return (~sum(data[start:end])) & 255
 
 
-def box_offset(box: int) -> int:
-    return BOX_BANKS[box // 6] + (box % 6) * BOX_SIZE
+def box_offset(box: int, profile=INTERNATIONAL) -> int:
+    half = profile.boxes_per_bank
+    return BOX_BANKS[box // half] + (box % half) * profile.box_size
 
 
-def bank_checksum(data: bytearray, bank: int) -> None:
-    end = bank + 6 * BOX_SIZE
+def bank_checksum(data: bytearray, bank: int, profile=INTERNATIONAL) -> None:
+    end = bank + profile.boxes_per_bank * profile.box_size
     data[end] = checksum(data, bank, end)
-    for i in range(6):
-        start = bank + i * BOX_SIZE
-        data[end + 1 + i] = checksum(data, start, start + BOX_SIZE)
+    for i in range(profile.boxes_per_bank):
+        start = bank + i * profile.box_size
+        data[end + 1 + i] = checksum(data, start, start + profile.box_size)
 
 
 def within(value: int, low: int, high: int, field: str) -> None:
@@ -55,12 +57,13 @@ class Layout:
     start: int
     capacity: int
     stride: int
+    name_bytes: int = NAME_BYTES
 
     def mon(self, slot: int) -> int:
         return self.start + self.capacity + 2 + slot * self.stride
 
     def owner(self, slot: int) -> int:
-        return self.mon(self.capacity) + NAME_BYTES * slot
+        return self.mon(self.capacity) + self.name_bytes * slot
 
     def nickname(self, slot: int) -> int:
         return self.owner(self.capacity + slot)
@@ -90,7 +93,9 @@ class Entry:
 
 class Save:
     def __init__(self, catalog: Catalog, raw: bytes, map_ids=None):
-        self.catalog = catalog
+        preferred = JAPANESE if catalog.japanese else INTERNATIONAL
+        self.profile = detect_profile(raw, preferred)
+        self.catalog = catalog if catalog.japanese == self.profile.japanese else Catalog.reference(self.profile.japanese)
         self.map_ids = map_ids
         self.original = bytes(raw)
         self.data = bytearray(raw)
@@ -98,19 +103,19 @@ class Save:
 
     @property
     def current_box(self) -> int:
-        return self.data[BOX_NUMBER] & (BOX_INITIALIZED - 1)
+        return self.data[self.profile.box_number] & (BOX_INITIALIZED - 1)
 
     @property
     def initialized(self) -> bool:
-        return bool(self.data[BOX_NUMBER] & BOX_INITIALIZED)
+        return bool(self.data[self.profile.box_number] & BOX_INITIALIZED)
 
     @property
     def player(self) -> str:
-        return self.catalog.charset.decode(self.data[PLAYER:PLAYER + NAME_BYTES])
+        return self.catalog.charset.decode(self.data[PLAYER:PLAYER + self.profile.name_bytes])
 
     @property
     def map_id(self) -> int:
-        return self.data[CURRENT_MAP]
+        return self.data[self.profile.current_map]
 
     @property
     def dirty(self) -> bool:
@@ -118,9 +123,10 @@ class Save:
 
     def layout(self, box: int | None) -> Layout:
         if box is None:
-            return Layout(PARTY, 6, 44)
-        within(box, 0, BOX_COUNT - 1, "箱号")
-        return Layout(ACTIVE_BOX if box == self.current_box else box_offset(box), 20, 33)
+            return Layout(self.profile.party, 6, 44, self.profile.name_bytes)
+        within(box, 0, self.profile.box_count - 1, "箱号")
+        return Layout(self.profile.active_box if box == self.current_box else box_offset(box, self.profile),
+                      self.profile.box_capacity, 33, self.profile.name_bytes)
 
     def count(self, box: int | None) -> int:
         layout = self.layout(box)
@@ -132,19 +138,19 @@ class Save:
         data = self.data
         if len(data) != SAVE_SIZE:
             raise InvalidSave(f"存档为 {len(data):,} 字节，此 ROM 的 SRAM 存档须为 32,768 字节。")
-        actual = checksum(data, PLAYER, MAIN_SUM)
-        if data[MAIN_SUM] != actual:
-            raise InvalidSave(f"主区校验错误。文件记录 {data[MAIN_SUM]:02X}，从内容计算得到 {actual:02X}。")
+        actual = checksum(data, PLAYER, self.profile.main_sum)
+        if data[self.profile.main_sum] != actual:
+            raise InvalidSave(f"主区校验错误。文件记录 {data[self.profile.main_sum]:02X}，从内容计算得到 {actual:02X}。")
         if self.map_ids is not None and self.map_id not in self.map_ids:
             raise InvalidSave(f"当前地图 ID {self.map_id:02X} 不在 ROM 的可用范围内。")
-        player = data[PLAYER:PLAYER + NAME_BYTES]
+        player = data[PLAYER:PLAYER + self.profile.name_bytes]
         if player[0] in (0, 0x50) or self.catalog.charset.string_end(player) is None:
             raise InvalidSave("玩家名结构不完整。请先在游戏中使用「保存」。")
-        within(self.current_box, 0, BOX_COUNT - 1, "当前箱号")
+        within(self.current_box, 0, self.profile.box_count - 1, "当前箱号")
         self.validate_mons(None, "随身队伍")
         self.validate_mons(self.current_box, f"当前箱子 {self.current_box + 1}")
         for pc, label in ((False, "背包"), (True, "PC 道具")):
-            start, capacity = PC_ITEMS if pc else BAG
+            start, capacity = (self.profile.pc_items, 50) if pc else (self.profile.bag, 20)
             count = data[start]
             if count > capacity or data[start + 1 + count * 2] != 255:
                 raise InvalidSave(f"{label}的容量或列表结束标记有误。")
@@ -154,13 +160,13 @@ class Save:
         if not self.initialized:
             return
         for bank in BOX_BANKS:
-            end = bank + 6 * BOX_SIZE
+            end = bank + self.profile.boxes_per_bank * self.profile.box_size
             if data[end] != checksum(data, bank, end):
                 raise InvalidSave(f"箱子存储区 {bank:04X} 的合计校验有误。")
-            for i in range(6):
-                box = i + (6 if bank == BOX_BANKS[1] else 0)
-                offset = box_offset(box)
-                if data[end + i + 1] != checksum(data, offset, offset + BOX_SIZE):
+            for i in range(self.profile.boxes_per_bank):
+                box = i + (self.profile.boxes_per_bank if bank == BOX_BANKS[1] else 0)
+                offset = box_offset(box, self.profile)
+                if data[end + i + 1] != checksum(data, offset, offset + self.profile.box_size):
                     raise InvalidSave(f"箱子 {box + 1} 的独立校验有误。")
                 if box != self.current_box:
                     self.validate_mons(box, f"箱子 {box + 1}")
@@ -184,10 +190,10 @@ class Save:
             if not 1 <= level <= 100:
                 raise InvalidSave(f"{label}第 {slot + 1} 格等级 {level} 无效。")
             n = layout.nickname(slot)
-            if not self.catalog.charset.valid_stored_name(self.data[n:n + NAME_BYTES]):
+            if not self.catalog.charset.valid_stored_name(self.data[n:n + self.profile.name_bytes]):
                 raise InvalidSave(f"{label}第 {slot + 1} 格的昵称缺少有效结束符。")
             owner = layout.owner(slot)
-            if not self.catalog.charset.valid_stored_name(self.data[owner:owner + NAME_BYTES]):
+            if not self.catalog.charset.valid_stored_name(self.data[owner:owner + self.profile.name_bytes]):
                 raise InvalidSave(f"{label}第 {slot + 1} 格的训练家名称结构不完整。")
 
     def read_mon(self, box: int | None, slot: int) -> Mon:
@@ -202,7 +208,7 @@ class Save:
         level = raw[33] if box is None else self.catalog.level(raw[0], exp)
         stats = (tuple(int.from_bytes(raw[i:i + 2], "big") for i in range(34, 44, 2)) if box is None
                  else self.catalog.stats(raw[0], level, iv, effort))
-        return Mon(raw[0], level, exp, self.catalog.charset.decode(self.data[name:name + NAME_BYTES]),
+        return Mon(raw[0], level, exp, self.catalog.charset.decode(self.data[name:name + self.profile.name_bytes]),
                    int.from_bytes(raw[1:3], "big"), raw[4], tuple(raw[8:12]),
                    tuple(v & 63 for v in raw[29:33]), tuple(v >> 6 for v in raw[29:33]),
                    iv, effort, stats)
@@ -213,7 +219,8 @@ class Save:
         effort = (0,) * 5
         stats = self.catalog.stats(species, level, iv, effort)
         moves = self.catalog.suggested_moves(species, level)
-        return Mon(species, level, self.catalog.experience(species, level), mon.name, stats[0], 0,
+        nickname = self.catalog.default_nickname(species)
+        return Mon(species, level, self.catalog.experience(species, level), nickname, stats[0], 0,
                    moves, tuple(self.catalog.base_pp[m] for m in moves), (0,) * 4, iv, effort, stats)
 
     def apply_mon(self, box: int | None, slot: int | None, mon: Mon) -> Mon:
@@ -297,12 +304,12 @@ class Save:
         data = bytearray(previous)
         other_box = box is not None and box != self.current_box
         if other_box and not self.initialized:
-            for b in range(BOX_COUNT):
-                start = box_offset(b)
+            for b in range(self.profile.box_count):
+                start = box_offset(b, self.profile)
                 data[start:start + 2] = b"\x00\xff"
-            data[BOX_NUMBER] |= BOX_INITIALIZED
+            data[self.profile.box_number] |= BOX_INITIALIZED
             for bank in BOX_BANKS:
-                bank_checksum(data, bank)
+                bank_checksum(data, bank, self.profile)
         offset = layout.mon(slot)
         raw = bytearray(layout.stride) if adding else data[offset:offset + layout.stride]
         species = self.catalog.species[mon.species]
@@ -316,9 +323,9 @@ class Save:
         raw[4] = mon.status
         raw[8:12] = bytes(mon.moves)
         if adding:
-            raw[12:14] = data[PLAYER_ID:PLAYER_ID + 2]
+            raw[12:14] = data[self.profile.player_id:self.profile.player_id + 2]
             owner = layout.owner(slot)
-            data[owner:owner + NAME_BYTES] = data[PLAYER:PLAYER + NAME_BYTES]
+            data[owner:owner + self.profile.name_bytes] = data[PLAYER:PLAYER + self.profile.name_bytes]
         raw[14:17] = mon.experience.to_bytes(3, "big")
         for i, value in enumerate(mon.effort):
             raw[17 + i * 2:19 + i * 2] = value.to_bytes(2, "big")
@@ -335,14 +342,14 @@ class Save:
             data[layout.start + 2 + slot] = 255
         if nick is not None:
             name_offset = layout.nickname(slot)
-            data[name_offset:name_offset + NAME_BYTES] = nick
+            data[name_offset:name_offset + self.profile.name_bytes] = nick
         if other_box:
-            bank_checksum(data, BOX_BANKS[box // 6])
+            bank_checksum(data, BOX_BANKS[box // self.profile.boxes_per_bank], self.profile)
         self.commit(data)
         return mon
 
     def items(self, pc: bool) -> list[Entry]:
-        start, _ = PC_ITEMS if pc else BAG
+        start = self.profile.pc_items if pc else self.profile.bag
         return [Entry(self.data[i], self.data[i + 1])
                 for i in range(start + 1, start + 1 + self.data[start] * 2, 2)]
 
@@ -367,7 +374,7 @@ class Save:
 
     def apply_items(self, pc: bool, index: int | None, entry: Entry | None) -> None:
         entries = self.items(pc)
-        start, capacity = PC_ITEMS if pc else BAG
+        start, capacity = (self.profile.pc_items, 50) if pc else (self.profile.bag, 20)
         old = None
         if index is not None:
             within(index, 0, len(entries) - 1, "道具位置")
@@ -378,7 +385,7 @@ class Save:
             return
         if old and (entry is None or entry.id != old.id):
             has_another = any(e.id == old.id for e in (*entries, *self.items(not pc)))
-            parcel_needed = old.id == 0x46 and not self.data[EVENT_FLAGS + 7] & 1
+            parcel_needed = old.id == 0x46 and not self.data[self.profile.event_flags + 7] & 1
             if not has_another and (old.id in BLOCK_FINITE_ITEMS or parcel_needed):
                 raise InvalidSave("此关键道具关系到剧情通路或只能领取一次，移除最后一份可能使流程中断。")
         if entry:
@@ -400,8 +407,19 @@ class Save:
         self.commit(data)
         return True
 
+    def set_bytes(self, changes):
+        data = bytearray(self.data)
+        for offset, value in changes:
+            within(offset, PLAYER, self.profile.main_sum - 1, "主区偏移")
+            within(value, 0, 255, "字节值")
+            data[offset] = value
+        if data == self.data:
+            return False
+        self.commit(data)
+        return True
+
     def commit(self, data: bytearray) -> None:
-        data[MAIN_SUM] = checksum(data, PLAYER, MAIN_SUM)
+        data[self.profile.main_sum] = checksum(data, PLAYER, self.profile.main_sum)
         old = self.data
         self.data = data
         try:

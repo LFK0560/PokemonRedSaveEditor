@@ -227,15 +227,16 @@ class MonDialog(EditorDialog):
 
     def nickname_info(self):
         if self.name.text() == self.mon.nickname and self.slot is not None:
+            maximum = self.save.profile.name_bytes-1
             self.name_count.setText("昵称保留原编码。修改时最多输入 10 字节（通常为 5 个汉字）。" if self.catalog.verified else
-                                    "昵称保留原编码。修改时最多输入 10 个本语言字库中的单字节字符。")
+                                    f"昵称保留原编码。修改时最多输入 {maximum} 个本语言字库中的单字节字符。")
             return
         try:
             name = self.catalog.charset.nickname(self.name.text())
         except ValueError as exc:
             self.name_count.setText(str(exc))
         else:
-            self.name_count.setText(f"昵称已用 {self.catalog.charset.string_end(name)} / 10 字节。")
+            self.name_count.setText(f"昵称已用 {self.catalog.charset.string_end(name)} / {self.save.profile.name_bytes-1} 字节。")
 
     def rebuild_moves(self, selected):
         species = self.species.currentData()

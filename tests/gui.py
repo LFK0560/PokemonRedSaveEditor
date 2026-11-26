@@ -210,13 +210,13 @@ def map_checks(window):
     QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton,
                      pos=view.mapFromScene(person.x * 16 + 8, person.y * 16 + 8))
     assert page.open_event == person
-    assert page.target_state.text() == "可重复互动" and not page.reset_button.isEnabled()
+    assert page.target_state.text() == "可重复互动" and page.reset_button.isEnabled()
     page.filter.setText("36:1")
     target = page.list.item(0)
     assert tuple(target.data(ROLE)) == (0x36, "1")
     QTest.mouseClick(page.list.viewport(), Qt.MouseButton.LeftButton, pos=page.list.visualItemRect(target).center())
     assert page.open_event == page.index.by_key[0x36, "1"]
-    assert not page.reset_button.isEnabled() and "徽章" in page.reason.text()
+    assert page.reset_button.isEnabled() and "徽章" in page.reason.text()
     page.filter.clear()
     model = window.document.model
     first, second = (page.index.by_key[k] for k in ((0xD7, "H28"), (0xD8, "H15")))
@@ -238,7 +238,7 @@ def map_checks(window):
         assert page.target_state.text() == "可触发"
         assert {i for i, (a, b) in enumerate(zip(raw, model.data)) if a != b} == {e.flags[0][0], MAIN_SUM}
     click(window.save_button)
-    print("PASS native Qt overview, detailed map, floor picker, original marker, blocked leader and same-position floor targets")
+    print("PASS native Qt overview, detailed map, floor picker, original marker, open leader and same-position floor targets")
 
 
 def checks(rom, before, after, fresh):

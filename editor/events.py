@@ -1,6 +1,8 @@
 from collections import Counter
 from dataclasses import dataclass, replace
 import re
+import json
+from pathlib import Path
 
 from .maps import Area, Atlas, Object
 from .rom import rom_address, save_address, word
@@ -118,7 +120,7 @@ def flag(address: int, bit: int) -> tuple[int, int]:
 
 
 def in_save(save: Save, bit: tuple[int, int]) -> bool:
-    return bool(save.data[bit[0]] & bit[1])
+    return bool(save.data[save.profile.reference_offset(bit[0])] & bit[1])
 
 
 @dataclass(frozen=True)
@@ -137,49 +139,100 @@ class Event:
     evidence: str = ""
     cooperative: bool = False
     requires_clear: tuple[tuple[int, int], ...] = ()
+    certified: bool = False
+    reference: bool = False
 
     @property
     def key(self) -> tuple[int, str]:
         return self.map_id, self.id
 
     def status(self, save: Save | None) -> str:
-        if self.cooperative:
+        if self.cooperative and not self.flags:
             return "可重复互动"
         if not save:
             return "导入存档后查看"
-        if any(in_save(save, bit) for bit in self.requires_clear):
-            return "通路已关闭"
         bits = self.flags or self.observed
         if not bits:
-            return "状态待验证" if "待验证" in self.disabled else "无法安全复位"
-        if self.flags and self.idle_at is not None and save.data[self.idle_at]:
-            return "地图脚本执行中"
+            return "可自定义关联标记"
         on = [in_save(save, f) for f in bits]
         if self.flags and len(on) > 1 and len(set(on)) > 1:
-            return "旗标状态不一致"
-        if self.disabled:
-            return "已完成 · 无法安全复位" if any(on) else "未完成 · 无法安全复位"
+            return "部分标记已设置"
         return "已完成" if any(on) else "可触发"
 
     def can_reset(self, save: Save | None) -> bool:
-        return bool(self.flags and not self.disabled and self.status(save) == "已完成")
+        return bool(self.flags and save)
+
+    def certified_for(self, save):
+        return self.certified and bool(save and save.catalog.verified and not save.profile.japanese)
 
     def reset(self, save: Save) -> bool:
-        if self.flags and not self.disabled and self.status(save) == "可触发":
-            return False
         if not self.can_reset(save):
-            raise InvalidSave(self.disabled or f"当前状态为「{self.status(save)}」，无法安全复位。")
-        return save.clear_flags(self.flags)
+            raise InvalidSave("此对象尚无关联标记，可在「关联标记」中填写偏移和掩码。")
+        return save.clear_flags(tuple((save.profile.reference_offset(offset), mask) for offset, mask in self.flags))
 
 
 class EventIndex:
     def __init__(self, atlas: Atlas):
         self.atlas = atlas
         self.rom = atlas.rom
+        if not atlas.catalog.verified:
+            self.read_reference_events()
+            return
         self.toggles = self.read_toggles()
         self.hidden_items = self.read_hidden_items()
         self.by_map = {a.id: self.area_events(a) for a in atlas.areas.values()}
+        reference = self.reference_events()
+        for map_id, events in self.by_map.items():
+            opened = []
+            for event in events:
+                certified = bool(event.flags and not event.disabled)
+                candidate = reference.get(event.key, {}).get("candidates", ())
+                flags = tuple(dict.fromkeys((*event.flags, *event.observed, *(tuple(v) for v in candidate))))
+                opened.append(replace(event, flags=flags, certified=certified))
+            self.by_map[map_id] = tuple(opened)
         self.by_key = {event.key: event for events in self.by_map.values() for event in events}
+
+    @staticmethod
+    def reference_events():
+        data = json.loads(Path(__file__).with_name("reference.json").read_text(encoding="utf-8"))
+        return {(v["map_id"], v["id"]): v for v in data["events"]}
+
+    def read_reference_events(self):
+        references = self.reference_events()
+        self.toggles, self.hidden_items = {}, []
+        self.by_map = {}
+        for area in self.atlas.areas.values():
+            rows = []
+            objects = {str(obj.id): obj for obj in area.objects}
+            for key, stored in references.items():
+                if key[0] != area.id:
+                    continue
+                values = stored.copy()
+                candidates = values.pop("candidates", ())
+                for field in ("flags", "observed", "requires_clear"):
+                    values[field] = tuple(tuple(v) for v in values[field])
+                values["flags"] = tuple(dict.fromkeys((*values["flags"], *values["observed"], *(tuple(v) for v in candidates))))
+                values["certified"], values["reference"] = False, True
+                values["evidence"] = "通用参考关联，未认证当前 ROM 脚本。 " + values["evidence"]
+                obj = objects.pop(values["id"], None)
+                if obj:
+                    values.update(x=obj.x, y=obj.y, sprite=obj.sprite)
+                elif values["id"].isdigit() and area.id not in self.atlas.reference_areas:
+                    continue
+                rows.append(Event(**values))
+            for obj in objects.values():
+                rows.append(Event(area.id, str(obj.id), obj.x, obj.y, obj.sprite,
+                                  f"对象 {obj.id}", obj.kind, reference=True,
+                                  disabled="可在关联标记中补充此版本的事件偏移。"))
+            self.by_map[area.id] = tuple(rows)
+        self.by_key = {e.key: e for rows in self.by_map.values() for e in rows}
+
+    def set_binding(self, key, flags):
+        event = replace(self.by_key[key], flags=tuple(flags), observed=(), certified=False,
+                        evidence="用户自定义关联", reference=True)
+        self.by_key[key] = event
+        self.by_map[event.map_id] = tuple(event if v.key == key else v for v in self.by_map[event.map_id])
+        return event
 
     def read_toggles(self):
         states = {}

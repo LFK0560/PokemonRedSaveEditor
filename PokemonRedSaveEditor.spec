@@ -6,7 +6,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('editor/map_index.json', 'editor')],
+    datas=[('editor/map_index.json', 'editor'), ('editor/reference.json', 'editor')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
